@@ -1,0 +1,9 @@
+# 비밀값 (로컬 전용 — 절대 커밋 금지)
+local_settings.py
+
+# 생성물
+report_*.html
+
+# Python
+__pycache__/
+*.pyc
