@@ -49,5 +49,8 @@ RECIPIENTS = {
     "Eric": _secret("MAIL_ERIC"),
     "Alex": _secret("MAIL_ALEX"),
     "Michael": _secret("MAIL_MICHAEL"),
-    "Calvin": _secret("MAIL_CALVIN"),
+    "Hailey": _secret("MAIL_HAILEY"),
+    "Trisha": _secret("MAIL_TRISHA"),
+    "Calvin": _secret("MAIL_CALVIN"),   # 관리자
+    "Jason": _secret("MAIL_JASON"),     # 관리자
 }

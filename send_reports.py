@@ -1,12 +1,11 @@
 """
-담당자별(Bryan / Eric / Alex / Michael) 프로젝트 & Task 리포트를
-각자에게 개별 메일로 발송한다.
+담당자별 프로젝트 & Task 리포트를 메일로 발송한다.
 
-준비:
-  config.py 에서
-    - SMTP_USER / SMTP_PASSWORD (보내는 Gmail + 앱 비밀번호)
-    - RECIPIENTS[...] 각 담당자 받는 메일 주소
-  를 채워 넣으세요.
+- 일반 담당자(Bryan / Eric / Alex / Michael / Hailey): 자기 것만 받음
+- 관리자(Calvin / Jaehyun): 전원(모든 사람)의 개별 테이블을 모두 받음
+
+준비: config.py(로컬은 local_settings.py, CI는 GitHub Secrets)에서
+  SMTP_USER / SMTP_PASSWORD / RECIPIENTS[...] 를 채워 넣으세요.
 
 사용법:
   python send_reports.py            # 미리보기(발송 안 함). *.html 파일로 저장
@@ -19,21 +18,29 @@ from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
 
-import bryan
 import config
 import people_projects as pp
 
 PROJECT_DB = "32b5658a-871f-81f4-9daa-f918d575d389"
 TASK_DB = "32b5658a-871f-814f-824a-ceafe15f89dc"
 
-# 담당자 -> 담당자 매칭 키워드(소문자)
+# 표시이름 -> 담당자 매칭 키워드(소문자)
 PEOPLE = [
     ("Bryan", "bryan"),
     ("Eric", "eric"),
     ("Alex", "alex"),
     ("Michael", "michael"),
+    ("Hailey", "hailey"),
+    ("Trisha", "trisha"),
     ("Calvin", "calvin"),
+    ("Jason", "jason"),
 ]
+
+# 관리자: 전원의 개별 테이블을 모두 받는 사람
+MANAGERS = {"Calvin", "Jason"}
+
+# 관리자 리포트에 넣을 개별 섹션 대상 (실무 담당자들. Jason 은 담당 데이터가 없어 제외)
+AGGREGATE_FOR_MANAGERS = ["Bryan", "Eric", "Alex", "Michael", "Hailey", "Trisha", "Calvin"]
 
 PROJECT_COLUMNS = [
     "프로젝트명", "상태", "담당자", "계약형태",
@@ -63,12 +70,7 @@ def rows_to_matrix(rows, columns):
 # HTML 생성
 # ----------------------------------------------------------------------
 def _esc(s):
-    s = str(s)
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def html_table(headers, matrix):
@@ -93,19 +95,26 @@ def html_table(headers, matrix):
     )
 
 
-def build_email_html(name, projects, tasks):
-    return f"""\
-<div style="font-family:'Malgun Gothic',AppleSDGothicNeo,sans-serif;color:#222;">
-  <h2 style="margin:0 0 4px;">{_esc(name)}님 프로젝트 &amp; Task 리포트</h2>
-  <p style="color:#666;margin:0 0 16px;">담당 프로젝트 {len(projects)}개 · Task {len(tasks)}개</p>
+def person_section(name, projects, tasks):
+    """한 사람의 프로젝트/Task 표 묶음 (메일 안에 들어가는 조각)."""
+    return f"""
+  <h2 style="margin:26px 0 4px;border-bottom:2px solid #333;padding-bottom:4px;">{_esc(name)}</h2>
+  <p style="color:#666;margin:0 0 10px;">담당 프로젝트 {len(projects)}개 · Task {len(tasks)}개</p>
 
-  <h3 style="margin:18px 0 8px;">📁 프로젝트 ({len(projects)})</h3>
+  <h3 style="margin:14px 0 6px;">📁 프로젝트 ({len(projects)})</h3>
   {html_table(PROJECT_COLUMNS, rows_to_matrix(projects, PROJECT_COLUMNS))}
 
-  <h3 style="margin:22px 0 8px;">✅ Task ({len(tasks)})</h3>
+  <h3 style="margin:18px 0 6px;">✅ Task ({len(tasks)})</h3>
   {html_table(TASK_HEADERS, rows_to_matrix(tasks, TASK_COLUMNS))}
+"""
 
-  <p style="color:#999;font-size:12px;margin-top:20px;">※ 이 메일은 Notion 데이터 기준 자동 생성되었습니다.</p>
+
+def wrap_email(title, inner_html):
+    return f"""\
+<div style="font-family:'Malgun Gothic',AppleSDGothicNeo,sans-serif;color:#222;">
+  <h1 style="margin:0 0 6px;font-size:20px;">{_esc(title)}</h1>
+  {inner_html}
+  <p style="color:#999;font-size:12px;margin-top:24px;">※ 이 메일은 Notion 데이터 기준 자동 생성되었습니다.</p>
 </div>"""
 
 
@@ -126,30 +135,48 @@ def main():
     projects_all = pp.query_all(PROJECT_DB)
     tasks_all = pp.query_all(TASK_DB)
 
-    # 사람별 리포트 준비
-    reports = []
+    # 1) 모든 사람의 데이터/섹션을 먼저 계산
+    data = {}       # name -> (projects, tasks)
+    sections = {}   # name -> section html
     for name, keyword in PEOPLE:
         projects = filter_by_person(projects_all, keyword)
         tasks = filter_by_person(tasks_all, keyword)
-        html = build_email_html(name, projects, tasks)
-        to_addr = config.RECIPIENTS.get(name, "").strip()
-        reports.append((name, to_addr, projects, tasks, html))
+        data[name] = (projects, tasks)
+        sections[name] = person_section(name, projects, tasks)
 
+    # 실무 담당자 섹션을 이어붙인 관리자용 본문
+    all_sections_html = "".join(sections[n] for n in AGGREGATE_FOR_MANAGERS)
+
+    # 2) 수신자별 메일 구성
+    reports = []  # (name, to_addr, subject, html, is_manager)
+    for name, _ in PEOPLE:
+        to_addr = config.RECIPIENTS.get(name, "").strip()
+        is_manager = name in MANAGERS
+        if is_manager:
+            subject = f"[프로젝트 리포트/관리자] 전체 담당자 현황 ({len(PEOPLE)}명)"
+            html = wrap_email(f"{name}님 (관리자용) — 전체 담당자 프로젝트 & Task", all_sections_html)
+        else:
+            projects, tasks = data[name]
+            subject = f"[프로젝트 리포트] {name} — 프로젝트 {len(projects)} / Task {len(tasks)}"
+            html = wrap_email(f"{name}님 프로젝트 & Task 리포트", sections[name])
+        reports.append((name, to_addr, subject, html, is_manager))
+
+    # 3) 미리보기
     if not do_send:
-        # 미리보기: html 파일로 저장
         print("=== 미리보기 모드 (실제 발송 안 함) ===")
-        for name, to_addr, projects, tasks, html in reports:
+        for name, to_addr, subject, html, is_manager in reports:
             fname = f"report_{name}.html"
             with open(fname, "w", encoding="utf-8") as f:
                 f.write(html)
+            tag = "관리자(전원)" if is_manager else "본인만"
             addr = to_addr or "(메일주소 미입력)"
-            print(f"  {name}: 프로젝트 {len(projects)} / Task {len(tasks)}  → {addr}   [{fname} 저장]")
+            print(f"  {name} [{tag}] → {addr}   [{fname} 저장]")
         print("\n실제 발송하려면:  python send_reports.py --send")
         return
 
-    # 실제 발송
+    # 4) 실제 발송
     if not config.SMTP_USER or not config.SMTP_PASSWORD:
-        print("❌ config.py 의 SMTP_USER / SMTP_PASSWORD 를 먼저 채워주세요.")
+        print("❌ SMTP_USER / SMTP_PASSWORD 를 먼저 채워주세요.")
         return
 
     print("SMTP 접속 중...")
@@ -157,13 +184,13 @@ def main():
     try:
         server.starttls()
         server.login(config.SMTP_USER, config.SMTP_PASSWORD)
-        for name, to_addr, projects, tasks, html in reports:
+        for name, to_addr, subject, html, is_manager in reports:
             if not to_addr:
                 print(f"  ⏭ {name}: 메일주소 미입력 → 건너뜀")
                 continue
-            subject = f"[프로젝트 리포트] {name} — 프로젝트 {len(projects)} / Task {len(tasks)}"
             send_mail(server, to_addr, subject, html)
-            print(f"  ✅ {name} → {to_addr} 발송 완료")
+            tag = "관리자(전원)" if is_manager else "본인만"
+            print(f"  ✅ {name} [{tag}] → {to_addr} 발송 완료")
     finally:
         server.quit()
     print("완료.")
