@@ -2,10 +2,12 @@ name: Daily Project Report
 
 on:
   schedule:
+
     # GitHub Actions cron 은 UTC 기준. 06:18 KST = 21:18 UTC (전날)
     # 정각(분=0)은 전 세계 작업이 몰려 지연/누락되므로 일부러 어긋난 분을 사용
     - cron: "18 21 * * *"
-  workflow_dispatch: {}   # Actions 탭에서 수동 실행 버튼
+
+
 
 jobs:
   send:
